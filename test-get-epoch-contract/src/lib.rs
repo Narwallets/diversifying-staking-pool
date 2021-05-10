@@ -1,19 +1,29 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::{env, log, near_bindgen, ext_contract, is_promise_success, PanicOnDefault, PromiseOrValue, Gas, Balance};
-use near_sdk::json_types::{U128};
+use near_sdk::json_types::U128;
+use near_sdk::{
+    env, ext_contract, is_promise_success, log, near_bindgen, Balance, Gas, PanicOnDefault,
+    PromiseOrValue,
+};
+
+#[cfg(target_arch = "wasm32")]
 use near_sdk::env::BLOCKCHAIN_INTERFACE;
 
 #[global_allocator]
 static ALLOC: near_sdk::wee_alloc::WeeAlloc = near_sdk::wee_alloc::WeeAlloc::INIT;
 
-mod upgrade;
+const ONE_NEAR: Balance = 1_000_000_000_000_000_000_000_000;
+const NEAR: Balance = ONE_NEAR;
+const TGAS: Gas = 1_000_000_000_000;
+const NO_DEPOSIT: u128 = 0;
 
-const CONTRACT_VERSION:&str = "0.0.1"; //to test Sputnik V2 remote-upgrade
+type U128String = U128;
+
+const CONTRACT_VERSION: &str = "0.0.1"; //to test Sputnik V2 remote-upgrade
 
 #[cfg(target_arch = "wasm32")]
 const BLOCKCHAIN_INTERFACE_NOT_SET_ERR: &str = "Blockchain interface not set.";
-
-const GAS_FOR_UPGRADE_CODE_AND_MIGRATE:u64 = 150;
+#[cfg(target_arch = "wasm32")]
+const GAS_FOR_UPGRADE: u64 = 50 * TGAS;
 
 //contract state
 #[near_bindgen]
@@ -25,13 +35,6 @@ pub struct TestContract {
     //last response received
     pub last_epoch: u64,
 }
-
-const ONE_NEAR: Balance  = 1_000_000_000_000_000_000_000_000;
-const NEAR: Balance = ONE_NEAR;
-const TGAS: Gas = 1_000_000_000_000;
-const NO_DEPOSIT:u128 = 0;
-
-type U128String = U128;
 
 #[ext_contract(ext_staking_pool)]
 pub trait ExtStakingPool {
@@ -62,96 +65,104 @@ pub trait SelfCallbacks {
 
 #[near_bindgen]
 impl TestContract {
-
     #[init]
-    pub fn new()-> Self{
+    pub fn new() -> Self {
         /* Prevent re-initializations */
         assert!(!env::state_exists(), "This contract is already initialized");
         return Self {
-             saved_message: String::from("init"),
-             saved_i32: 0,
-             last_epoch: env::epoch_height()
-         };
+            saved_message: String::from("init"),
+            saved_i32: 0,
+            last_epoch: env::epoch_height(),
+        };
     }
 
     // ------------------------------
     // test Sputnik V2 remote-upgrade
     // ------------------------------
     /// get version ()
-    pub fn get_version()->String { CONTRACT_VERSION.into() }
+    pub fn get_version(self) -> String {
+        CONTRACT_VERSION.into()
+    }
 
     // ------------------------------
     // Main methods
     // ------------------------------
     #[payable]
-    pub fn set_message(&mut self, message: String){
+    pub fn set_message(&mut self, message: String) {
         self.saved_message = message;
     }
     #[payable]
-    pub fn set_i32(&mut self, num: i32){
+    pub fn set_i32(&mut self, num: i32) {
         self.saved_i32 = num;
     }
 
-    pub fn get_message(&self)-> String{
+    pub fn get_message(&self) -> String {
         return self.saved_message.clone();
     }
 
     ///Make a request to the dia-gateway smart contract
-    pub fn get_epoch_height(&self)-> u64 {
-        return env::epoch_height()
+    pub fn get_epoch_height(&self) -> u64 {
+        return env::epoch_height();
     }
 
     ///Make a request to the dia-gateway smart contract
-    pub fn get_block_index(&self)-> u64 {
-        return env::block_index()
+    pub fn get_block_index(&self) -> u64 {
+        return env::block_index();
     }
 
     // ------------------------------
-    //Test u128 as argument type in a callback 
+    //Test u128 as argument type in a callback
     // ------------------------------
-    pub fn test_callbacks(&self)-> PromiseOrValue<u128> {
-
-        let big_amount:u128 = u128::MAX; 
+    pub fn test_callbacks(&self) -> PromiseOrValue<u128> {
+        let big_amount: u128 = u128::MAX;
         //query our current balance (includes staked+unstaked+staking rewards)
         ext_staking_pool::get_account_total_balance(
             String::from("lucio.testnet"),
             //promise params
             &String::from("meta.pool.testnet"),
             NO_DEPOSIT,
-            10*TGAS,
+            10 * TGAS,
         )
         .then(ext_self_owner::on_get_sp_total_balance(
             big_amount,
             //promise params
             &env::current_account_id(),
             NO_DEPOSIT,
-            10*TGAS,
-        )).into()
+            10 * TGAS,
+        ))
+        .into()
     }
     //prev-fn continues here
     #[private]
-    pub fn on_get_sp_total_balance(big_amount:u128, #[callback] balance:U128String) -> U128String {
-        log!("is_promise_success:{} big_amount:{} big_amount(nears):{} balance:{}",
-            is_promise_success(), big_amount, big_amount/NEAR, balance.0);
+    pub fn on_get_sp_total_balance(
+        big_amount: u128,
+        #[callback] balance: U128String,
+    ) -> U128String {
+        log!(
+            "is_promise_success:{} big_amount:{} big_amount(nears):{} balance:{}",
+            is_promise_success(),
+            big_amount,
+            big_amount / NEAR,
+            balance.0
+        );
         return balance;
     }
 
-    /// upgrade_code_and_migrate, called from Sputnik V2
+    /// upgrade code and then call migrate() on the new code, called from Sputnik V2
     #[cfg(target_arch = "wasm32")]
-    pub fn upgrade_code_and_migrate(code:Option<Vec<u8>>) {
-        assert!(env::predecessor_account_id()=="");
-        log!("bytes.length {}",code.unwrap().len() );
+    pub fn upgrade() {
+        assert!(env::predecessor_account_id() == "dao.pool.testnet");
+        //log!("bytes.length {}",code.unwrap().len() );
         let current_id = env::current_account_id().into_bytes();
         let method_name = "migrate".as_bytes().to_vec();
-        let attached_gas = env::prepaid_gas() - env::used_gas() - GAS_FOR_UPGRADE_CODE_AND_MIGRATE;
+        let attached_gas = env::prepaid_gas() - env::used_gas() - GAS_FOR_UPGRADE;
         unsafe {
             BLOCKCHAIN_INTERFACE.with(|b| {
                 // Load input (new contract code) into register 0
                 b.borrow()
                     .as_ref()
                     .expect(BLOCKCHAIN_INTERFACE_NOT_SET_ERR)
-                    .input(0); 
-                
+                    .input(0);
                 //prepare self-call promise
                 let promise_id = b
                     .borrow()
@@ -180,7 +191,6 @@ impl TestContract {
                     );
             });
         }
-
     }
 
     //-----------------
@@ -203,7 +213,6 @@ impl TestContract {
         let new: TestContract = old;
         return new; //return new struct, will be stored as contract state
     }
-
 }
 
 // ------------------------------
@@ -215,11 +224,10 @@ mod tests {
     use near_sdk::MockedBlockchain;
     use near_sdk::{testing_env, VMContext};
 
-
     /// Set the contract context
     pub fn initialize() {
-        let context = get_context(String::from("client.testnet"), 10);                    
-        testing_env!(context); 
+        let context = get_context(String::from("client.testnet"), 10);
+        testing_env!(context);
     }
 
     /// Defines the context for the contract
@@ -252,7 +260,10 @@ mod tests {
         let mut contract = super::TestContract::new();
         let msg = String::from("test string");
         contract.set_message(msg.clone());
-        assert_eq!(contract.get_message(), msg.clone(), "Contract message is different from the expected");
+        assert_eq!(
+            contract.get_message(),
+            msg.clone(),
+            "Contract message is different from the expected"
+        );
     }
-
 }
